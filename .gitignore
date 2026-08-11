@@ -1,0 +1,3 @@
+spdm_tool/spdm_tool
+spdm_tool/responder
+spdm_tool/*.o

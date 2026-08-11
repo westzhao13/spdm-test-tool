@@ -1,14 +1,16 @@
-# SPDM test tool - host-side libspdm requester
-# Links against locally built libspdm (openssl backend).
+# SPDM test tool - host-side libspdm requester.
+# Links against the prebuilt libspdm + openssl bundled in ../lib/ (x86_64 Linux);
+# no libspdm/openssl source needed on the build machine.
+# Override LIBSPDM_INC / LIBSPDM_LIB / LIBSPDM_OPENSSL_LIB to use a local build.
 
-# Link against spdm-emu's submodule libspdm (same version as spdm_responder_emu,
-# avoids TCP-binding wire format mismatch between libspdm 3.8.2 and newer).
-LIBSPDM_DIR ?= /home/xiangzhao/pine/sfx/spdm/spdm-emu/libspdm
-LIBSPDM_LIB  = /home/xiangzhao/pine/sfx/spdm/spdm-emu/build/lib
+SPDM_TOOL_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+LIBSPDM_INC   ?= $(abspath $(SPDM_TOOL_DIR)../lib/include)
+LIBSPDM_LIB   ?= $(abspath $(SPDM_TOOL_DIR)../lib/libspdm)
+LIBSPDM_OPENSSL_LIB ?= $(abspath $(SPDM_TOOL_DIR)../lib/openssl)
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -Wall -Wextra
-CFLAGS  += -I$(LIBSPDM_DIR)/include -I$(LIBSPDM_DIR)/os_stub/include
+CFLAGS  += -I$(LIBSPDM_INC)/spdm -I$(LIBSPDM_INC)/os_stub
 
 OBJS = main.o spdm_client.o transport_tcp.o transport_mctp.o transport_doe.o
 
@@ -30,8 +32,6 @@ LIBS = -L$(LIBSPDM_LIB) \
 	-lplatform_lib \
 	-L$(LIBSPDM_OPENSSL_LIB) -lcrypto \
 	-lpthread -ldl -lm
-
-LIBSPDM_OPENSSL_LIB ?= /home/xiangzhao/pine/sfx/spdm/spdm-emu/build/out/openssllib.out/openssl-install/lib
 
 all: spdm_tool responder
 

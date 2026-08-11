@@ -14,14 +14,17 @@ scripts/      switch_mode.sh - mctp|doe driver-mode switch (doe.ko vs cxl stack)
 
 ## Build
 
-Requires a built libspdm (see doc/plan_spdm_test_tool.md §9.1 for paths; the
-Makefile links against spdm-emu's submodule libspdm build to stay wire-compatible
-with spdm_responder_emu).
+Prebuilt libspdm + openssl are bundled in `lib/` (x86_64 Linux, openssl
+backend) — no libspdm/openssl source required on the build machine. Build
+machine needs only gcc and standard system libs (pthread/dl/m).
 
 ```bash
 cd spdm_tool
 make            # spdm_tool + responder
 ```
+
+> For another architecture, build libspdm yourself and point the Makefile's
+> `LIBSPDM_INC` / `LIBSPDM_LIB` / `LIBSPDM_OPENSSL_LIB` at your build.
 
 ## Usage
 
