@@ -20,11 +20,13 @@ static void usage(const char *prog)
            "  --cert <file.der>        peer root cert for CHALLENGE verification\n"
            "  --slot <n>               responder slot id (default 0)\n"
            "  --skip <a,b,c,d>         skip digest/cert/chal/meas steps\n"
+           "  --cmd <step>             run one step only: version|capabilities|algorithms|digest|cert|chal|meas\n"
            "Example:\n"
            "  %s --trans tcp                          # smoke vs spdm_responder_emu\n"
            "  %s --trans mctp --eid 8\n"
-           "  %s --trans doe --doe-udp 127.0.0.1:2324\n",
-           prog, prog, prog, prog);
+           "  %s --trans doe --doe-udp 127.0.0.1:2324\n"
+           "  %s --trans mctp --eid 8 --cmd version   # discovery step only\n",
+           prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char **argv)
@@ -38,6 +40,7 @@ int main(int argc, char **argv)
         {"cert",     required_argument, NULL, 'r'},
         {"slot",     required_argument, NULL, 's'},
         {"skip",     required_argument, NULL, 'k'},
+        {"cmd",      required_argument, NULL, 'C'},
         {"help",     no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
@@ -46,12 +49,13 @@ int main(int argc, char **argv)
     memset(&opts, 0, sizeof(opts));
     opts.transport = 0;
     opts.slot_id = 0;
+    opts.cmd = SPDM_TOOL_CMD_NONE;
     opts.do_digest = true;
     opts.do_cert = true;
     opts.do_chal = true;
     opts.do_meas = true;
 
-    while ((opt = getopt_long(argc, argv, "t:p:e:u:c:r:s:k:h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:p:e:u:c:r:s:k:C:h", long_opts, NULL)) != -1) {
         switch (opt) {
         case 't':
             if (strcmp(optarg, "tcp") == 0)
@@ -92,6 +96,29 @@ int main(int argc, char **argv)
                 else if (strcmp(tok, "meas") == 0)
                     opts.do_meas = false;
                 tok = strtok(NULL, ",");
+            }
+            break;
+        }
+        case 'C': {
+            static const struct { const char *name; int cmd; } cmds[] = {
+                {"version",      SPDM_TOOL_CMD_VERSION},
+                {"capabilities", SPDM_TOOL_CMD_CAPABILITIES},
+                {"algorithms",   SPDM_TOOL_CMD_ALGORITHMS},
+                {"digest",       SPDM_TOOL_CMD_DIGEST},
+                {"cert",         SPDM_TOOL_CMD_CERT},
+                {"chal",         SPDM_TOOL_CMD_CHAL},
+                {"meas",         SPDM_TOOL_CMD_MEAS},
+            };
+            size_t i;
+            for (i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
+                if (strcmp(optarg, cmds[i].name) == 0) {
+                    opts.cmd = cmds[i].cmd;
+                    break;
+                }
+            }
+            if (i == sizeof(cmds) / sizeof(cmds[0])) {
+                fprintf(stderr, "bad --cmd: %s\n", optarg);
+                return 1;
             }
             break;
         }

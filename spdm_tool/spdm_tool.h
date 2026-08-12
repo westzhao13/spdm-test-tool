@@ -13,6 +13,16 @@
 #define SPDM_TOOL_TRANS_MCTP 2
 #define SPDM_TOOL_TRANS_DOE  3
 
+/* --cmd single-step modes (0 = full flow) */
+#define SPDM_TOOL_CMD_NONE         0
+#define SPDM_TOOL_CMD_VERSION      1
+#define SPDM_TOOL_CMD_CAPABILITIES 2
+#define SPDM_TOOL_CMD_ALGORITHMS   3
+#define SPDM_TOOL_CMD_DIGEST       4
+#define SPDM_TOOL_CMD_CERT         5
+#define SPDM_TOOL_CMD_CHAL         6
+#define SPDM_TOOL_CMD_MEAS         7
+
 /* Buffer sizing, same policy as spdm-emu spdm_emu.h.
  * LIBSPDM_TCP_TRANSPORT_*_SIZE are not exported by libspdm 3.8.2
  * (spdm-emu submodule carries them); values match spdm-emu. */
@@ -32,6 +42,7 @@ typedef struct {
     uint8_t     mctp_eid;         /* remote MCTP EID (trans=mctp) */
     const char *doe_udp;          /* "host:port" for DOE UDP (trans=doe) */
     const char *root_cert_path;   /* peer root cert (DER) for CHALLENGE, may be NULL */
+    int         cmd;              /* SPDM_TOOL_CMD_* single-step mode */
     bool        do_digest;
     bool        do_cert;
     bool        do_chal;

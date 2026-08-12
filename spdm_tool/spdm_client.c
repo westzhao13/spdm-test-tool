@@ -13,6 +13,8 @@
 #include "library/spdm_transport_pcidoe_lib.h"
 #include "library/spdm_transport_tcp_lib.h"
 #include "industry_standard/spdm.h"
+#include "internal/libspdm_common_lib.h"
+#include "internal/libspdm_requester_lib.h"
 
 #include "spdm_tool.h"
 
@@ -232,6 +234,65 @@ static int do_connection(void *spdm_context)
     return 0;
 }
 
+static int do_version_only(void *spdm_context)
+{
+    libspdm_context_t *ctx = spdm_context;
+    uint8_t count = SPDM_MAX_VERSION_COUNT;
+    spdm_version_number_t entries[SPDM_MAX_VERSION_COUNT];
+    libspdm_return_t status;
+    int i;
+
+    status = libspdm_get_version(ctx, &count, entries);
+    if (LIBSPDM_STATUS_IS_ERROR(status)) {
+        fprintf(stderr, "get_version failed: 0x%x\n", status);
+        return -1;
+    }
+    printf("[SPDM] GET_VERSION OK, %u version(s):", count);
+    for (i = 0; i < count; i++)
+        printf(" v%u.%u", (entries[i] >> 12) & 0xF, (entries[i] >> 8) & 0xF);
+    printf("\n");
+    return 0;
+}
+
+static int do_caps_only(void *spdm_context)
+{
+    libspdm_context_t *ctx = spdm_context;
+    libspdm_return_t status;
+
+    if (do_version_only(ctx) != 0)
+        return -1;
+    status = libspdm_get_capabilities(ctx);
+    if (LIBSPDM_STATUS_IS_ERROR(status)) {
+        fprintf(stderr, "get_capabilities failed: 0x%x\n", status);
+        return -1;
+    }
+    printf("[SPDM] GET_CAPABILITIES OK, ct_exponent=%u flags=0x%08x\n",
+           ctx->connection_info.capability.ct_exponent,
+           (unsigned)ctx->connection_info.capability.flags);
+    return 0;
+}
+
+static int do_algos_only(void *spdm_context)
+{
+    libspdm_context_t *ctx = spdm_context;
+    libspdm_return_t status;
+    const libspdm_device_algorithm_t *alg = &ctx->connection_info.algorithm;
+
+    if (do_caps_only(ctx) != 0)
+        return -1;
+    status = libspdm_negotiate_algorithms(ctx);
+    if (LIBSPDM_STATUS_IS_ERROR(status)) {
+        fprintf(stderr, "negotiate_algorithms failed: 0x%x\n", status);
+        return -1;
+    }
+    printf("[SPDM] NEGOTIATE_ALGORITHMS OK, meas_spec=0x%02x meas_hash=0x%08x "
+           "base_asym=0x%08x base_hash=0x%08x dhe=0x%04x aead=0x%04x\n",
+           alg->measurement_spec, (unsigned)alg->measurement_hash_algo,
+           (unsigned)alg->base_asym_algo, (unsigned)alg->base_hash_algo,
+           alg->dhe_named_group, alg->aead_cipher_suite);
+    return 0;
+}
+
 static int do_digest(void *spdm_context, uint8_t *slot_mask)
 {
     libspdm_return_t status;
@@ -372,25 +433,58 @@ int spdm_tool_main(const spdm_tool_opts_t *opts)
         printf("[DOE] discovery OK: spdm=%d secured_spdm=%d\n", spdm_ok, secured_ok);
     }
 
-    if (do_connection(spdm_context) != 0) {
-        rc = -1;
-        goto out;
-    }
-    if (opts->do_digest && do_digest(spdm_context, &slot_mask) != 0) {
-        rc = -1;
-        goto out;
-    }
-    if (opts->do_cert && do_certificate(spdm_context, opts->slot_id) != 0) {
-        rc = -1;
-        goto out;
-    }
-    if (opts->do_chal && do_challenge(spdm_context, opts->slot_id) != 0) {
-        rc = -1;
-        goto out;
-    }
-    if (opts->do_meas && do_measurement(spdm_context, opts->slot_id) != 0) {
-        rc = -1;
-        goto out;
+    switch (opts->cmd) {
+    case SPDM_TOOL_CMD_VERSION:
+        rc = do_version_only(spdm_context);
+        break;
+    case SPDM_TOOL_CMD_CAPABILITIES:
+        rc = do_caps_only(spdm_context);
+        break;
+    case SPDM_TOOL_CMD_ALGORITHMS:
+        rc = do_algos_only(spdm_context);
+        break;
+    case SPDM_TOOL_CMD_DIGEST:
+        rc = do_connection(spdm_context);
+        if (rc == 0)
+            rc = do_digest(spdm_context, &slot_mask);
+        break;
+    case SPDM_TOOL_CMD_CERT:
+        rc = do_connection(spdm_context);
+        if (rc == 0)
+            rc = do_certificate(spdm_context, opts->slot_id);
+        break;
+    case SPDM_TOOL_CMD_CHAL:
+        rc = do_connection(spdm_context);
+        if (rc == 0)
+            rc = do_challenge(spdm_context, opts->slot_id);
+        break;
+    case SPDM_TOOL_CMD_MEAS:
+        rc = do_connection(spdm_context);
+        if (rc == 0)
+            rc = do_measurement(spdm_context, opts->slot_id);
+        break;
+    default:
+        if (do_connection(spdm_context) != 0) {
+            rc = -1;
+            goto out;
+        }
+        if (opts->do_digest && do_digest(spdm_context, &slot_mask) != 0) {
+            rc = -1;
+            goto out;
+        }
+        if (opts->do_cert && do_certificate(spdm_context, opts->slot_id) != 0) {
+            rc = -1;
+            goto out;
+        }
+        if (opts->do_chal && do_challenge(spdm_context, opts->slot_id) != 0) {
+            rc = -1;
+            goto out;
+        }
+        if (opts->do_meas && do_measurement(spdm_context, opts->slot_id) != 0) {
+            rc = -1;
+            goto out;
+        }
+        break;
     }
 
 out:

@@ -140,6 +140,8 @@ int tr_tcp_init(void *spdm_context, const spdm_tool_opts_t *opts)
         perror("[TCP] socket");
         return -1;
     }
+    int reuse = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
