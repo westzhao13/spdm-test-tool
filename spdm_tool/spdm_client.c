@@ -358,8 +358,8 @@ static int do_measurement(void *spdm_context, uint8_t slot_id)
     libspdm_return_t status;
     uint8_t content_changed;
     uint8_t number_of_blocks;
-    uint32_t record_length;
     uint8_t record[0x1000];
+    uint32_t record_length = sizeof(record);
 
     status = libspdm_get_measurement(spdm_context, NULL,
                                      SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE,
@@ -456,10 +456,18 @@ int spdm_tool_main(const spdm_tool_opts_t *opts)
     case SPDM_TOOL_CMD_CHAL:
         rc = do_connection(spdm_context);
         if (rc == 0)
+            rc = do_digest(spdm_context, &slot_mask);
+        if (rc == 0)
+            rc = do_certificate(spdm_context, opts->slot_id);
+        if (rc == 0)
             rc = do_challenge(spdm_context, opts->slot_id);
         break;
     case SPDM_TOOL_CMD_MEAS:
         rc = do_connection(spdm_context);
+        if (rc == 0)
+            rc = do_digest(spdm_context, &slot_mask);
+        if (rc == 0)
+            rc = do_certificate(spdm_context, opts->slot_id);
         if (rc == 0)
             rc = do_measurement(spdm_context, opts->slot_id);
         break;
