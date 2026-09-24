@@ -6,6 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Host-side **SPDM test tool** built on **`libspdm` `4.0.0-rc`** + **`OpenSSL` `3.5.5`**, pulled in as **git submodules** (`lib/libspdm`, `lib/openssl`) and built from source — a libspdm Requester that talks to a CXL device's SPDM responder over **TCP / MCTP (AF_MCTP) / PCIe DOE**, plus a minimal UDP/DOE `spdm_responder_udp` for end-to-end verification when no real hardware is present. It is a **verification tool**, not a production SPDM stack; the goal is to validate that a device's SPDM implementation is wire-correct and crypto-correct.
 
+The repo is self-contained for the DOE path too: `driver/doe/` holds the vendored
+out-of-tree kernel module (`doe.ko`, GPL-2.0, separate from this repo's
+Apache-2.0) that provides `/dev/doeN`, and `scripts/` holds the mode scripts that
+install/uninstall it.
+
 ## Build
 
 Submodules build themselves from the Makefile (openssl via `./Configure` + `make build_libs`, libspdm via CMake). Both build dirs live under `lib/build/` — deliberately **outside** the submodules, because a parent `.gitignore` cannot reach into a submodule and an in-tree build would leave `lib/openssl` permanently reported as modified. Network access required on first build for `git submodule update --init`.
@@ -56,6 +61,7 @@ Driver muting between cxl stack and doe.ko is mode-exclusive; the toggle script 
   - `transport_doe.c` — two sub-modes: `--doe-udp <host:port>` (UDP relay) or `--doe-dev /dev/doeN` (direct `DOE_IOCTL_MBOX_CMD` ioctl). Self-implements **DOE Discovery** (PCI_SIG + SPDM 0x01 / Secured 0x02) before any SPDM traffic.
 - **Test responder** — `spdm_tool/spdm_responder_udp.c`: libspdm responder over UDP/2326, with self-handled DOE Discovery and libspdm sample cert chain (`ecp384/bundle_responder.certchain.der`). Used for regression when no device is present.
 - **Integrator hooks** — `spdm_tool/spdm_io.c`: `libspdm_read_input_file` / `libspdm_write_output_file` / `libspdm_dump_hex_str`, required by libspdm's `device_secret_lib_sample`. Shared by both binaries — do not re-declare them in `spdm_client.c` or `spdm_responder_udp.c` (that is how they got duplicated once already).
+- **DOE kernel module** — `driver/doe/` (vendored GPL-2.0, copied verbatim from `pine_vd_scripts`, so upstream edits do not propagate). Built by `make -C driver/doe`, or on demand by `scripts/install_doe_driver.sh`. `scripts/switch_mode.sh` drives install/uninstall for both modes and resolves them through `$SCRIPT_DIR`, so those four script filenames must stay exact.
 - **Single-step CLI modes** dispatch into `do_<x>` in `spdm_client.c`. Full flow (default) runs `do_connection → do_digest → do_certificate → do_challenge → do_measurement` in order.
 
 ## Pitfalls / non-obvious invariants from history
@@ -68,6 +74,8 @@ These have bitten us and matter when changing anything in `spdm_client.c` / `spd
 - **Cert chain must be in SPDM format** — `[length (4B BE) | root_hash | DER...]` — use `libspdm_read_responder_public_certificate_chain`. A raw concat of DER certs is invalid.
 - **Transport max = `buffer - header - tail`** — under-registering causes libspdm to truncate encoded headers; over-registering allocates bogus scratch.
 - **`recvfrom` before init `fromlen`** — uninitialised `fromlen` accepts the first packet as 0-byte and silently rejects later ones.
+- **DOE capability offsets exist only as `-D` flags** — `NORMAL_DOE_CAP_OFF` (0xd00) / `SECURITY_DOE_CAP_OFF` (0xd80) are defined in `driver/doe/Makefile`, in no header, and `spdm_tool/transport_doe.c` duplicates the same values locally. If you change one, change both, or the tool addresses the wrong mailbox instance.
+- **The DOE ioctl response starts at buffer word 0** — `doe_main.c` copies the response from a freshly allocated buffer to the caller's buffer at offset 0, overwriting the cap-offset selector the caller wrote at word 0. So the response DOE header is DW0 and its length is `DW1[17:0]`; `transport_doe.c` reading the length from `g_dev_buf + 4` is correct, not an off-by-one.
 - **`KEY_EX_CAP` is set in `spdm_client.c` cap_flags but `do_key_exchange` does not exist** — the tool currently exposes only the 6-step connection+identity+measurement path; this is the central gap (Session, PSK, CSR/SET_CERT, Event, REQ_ASYM_SIGN, Multi-key, Vendor, Mut-Auth).
 
 ## Docs to read first

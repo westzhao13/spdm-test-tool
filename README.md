@@ -9,10 +9,36 @@ for testing a CXL device's SPDM implementation over MCTP or PCIe DOE.
 spdm_tool/    SPDM test tool source (libspdm requester, TCP/MCTP/DOE transports)
               + spdm_responder_udp.c (UDP DOE responder for end-to-end testing)
               + spdm_io.c (integrator file-I/O hooks shared by both binaries)
+driver/doe/   out-of-tree PCIe DOE kernel module (doe.ko) — GPL-2.0, vendored
 lib/          libspdm + openssl git submodules; lib/build/ holds their build output
 doc/          test_flow.md (transport/wire detail), spdm_1.2_1.3_coverage_spec.md
-scripts/      switch_mode.sh (mctp|doe driver switch), hw_smoke.sh (on-device smoke)
+scripts/      switch_mode.sh (mctp|doe driver switch) + the mode scripts it drives,
+              hw_smoke.sh (on-device smoke)
 ```
+
+## DOE kernel driver (`driver/doe/`)
+
+The `--trans doe --doe-dev /dev/doeN` path needs the out-of-tree `doe.ko`. Its
+source is vendored here so the repo is self-contained.
+
+- **License**: GPL-2.0 (`driver/doe/LICENSE`) — separate from this repo's
+  Apache-2.0. It is a kernel module, so that split is expected.
+- **Vendored from** `pine_vd_scripts@9a78266` (`cxl_tools/doe_test_app/driver/`),
+  copied verbatim. Edits made there do not propagate — re-diff against upstream
+  if you need to pull a change.
+- **Build**: `make -C driver/doe` (also done on demand by
+  `scripts/install_doe_driver.sh`). Needs kernel headers at
+  `/lib/modules/$(uname -r)/build`; override with `KDIR=` / `DIST=`. Note the
+  default goal cleans first, so every `make` is a full rebuild.
+- The module binds by **PCI class `0x050210`**; the `cc53 1030` id is injected by
+  the install script via sysfs `new_id`.
+- Host auto-detection (`lscpu` hypervisor probe + `lspci -d cc53::0502 | wc -l`)
+  selects the VU13P / ZEBU / ZEBU-MLD build variant. All three carry the same DOE
+  capability offsets (`0xd00` normal, `0xd80` security) — defined only as `-D`
+  flags in `driver/doe/Makefile`, in no header.
+
+`scripts/switch_mode.sh doe` installs it (and `mctp` uninstalls it); both modes
+need those scripts, which is why all four live in `scripts/`.
 
 ## Pinned library versions
 

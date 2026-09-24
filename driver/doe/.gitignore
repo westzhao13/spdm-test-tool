@@ -1,0 +1,12 @@
+# kbuild artifacts (out-of-tree module build in this directory).
+# Upstream keeps these rules in doe_test_app/.gitignore, which sits outside
+# driver/ and so did not travel with the vendored copy.
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.i
+Module.symvers
+modules.order
+.tmp_versions/
