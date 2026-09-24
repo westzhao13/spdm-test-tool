@@ -375,38 +375,8 @@ static int do_measurement(void *spdm_context, uint8_t slot_id)
     return 0;
 }
 
-/* Required by libspdm sample device secret lib (key/cert loading).
- * Integrator-provided in spdm-emu (spdm_emu_common/support.c). */
-bool libspdm_read_input_file(const char *file_name, void **file_data,
-                             size_t *file_size)
-{
-    FILE *fp;
-    size_t len;
-
-    fp = fopen(file_name, "rb");
-    if (fp == NULL) {
-        fprintf(stderr, "read_input_file: cannot open %s\n", file_name);
-        *file_data = NULL;
-        return false;
-    }
-    fseek(fp, 0, SEEK_END);
-    len = (size_t)ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    *file_data = malloc(len);
-    if (*file_data == NULL) {
-        fclose(fp);
-        return false;
-    }
-    if (fread(*file_data, 1, len, fp) != len) {
-        free(*file_data);
-        *file_data = NULL;
-        fclose(fp);
-        return false;
-    }
-    fclose(fp);
-    *file_size = len;
-    return true;
-}
+/* Integrator file I/O hooks (libspdm_read_input_file / write_output_file /
+ * dump_hex_str) live in spdm_io.c, shared with the responder binary. */
 
 int spdm_tool_main(const spdm_tool_opts_t *opts)
 {

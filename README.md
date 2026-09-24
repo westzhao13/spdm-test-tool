@@ -8,23 +8,61 @@ for testing a CXL device's SPDM implementation over MCTP or PCIe DOE.
 ```
 spdm_tool/    SPDM test tool source (libspdm requester, TCP/MCTP/DOE transports)
               + spdm_responder_udp.c (UDP DOE responder for end-to-end testing)
-doc/          Design/plan/test-flow/DOE-driver-research/TCP-conversion docs
-scripts/      switch_mode.sh - mctp|doe driver-mode switch (doe.ko vs cxl stack)
+              + spdm_io.c (integrator file-I/O hooks shared by both binaries)
+lib/          libspdm + openssl git submodules; lib/build/ holds their build output
+doc/          test_flow.md (transport/wire detail), spdm_1.2_1.3_coverage_spec.md
+scripts/      switch_mode.sh (mctp|doe driver switch), hw_smoke.sh (on-device smoke)
 ```
+
+## Pinned library versions
+
+**Built from source as git submodules (not prebuilt binaries):**
+
+| Library | Submodule path | Pin | Build system |
+|---|---|---|---|
+| **libspdm** | `lib/libspdm` | tag **`4.0.0-rc`** (commit `8a92317f`) — `LIBSPDM_MAJOR.MINOR.PATCH = 0x04.0x00.0x00` | CMake → `lib/build/libspdm/` |
+| **OpenSSL** (libcrypto) | `lib/openssl` | tag **`openssl-3.5.5`** (commit `67b5686b`) — `OpenSSL 3.5.5 27 Jan 2026` | `./Configure` + `make build_libs` → `lib/build/openssl/` |
+
+> Note: there is **no GA `4.0.0` tag** at github.com/DMTF/libspdm — only
+> `4.0.0-rc`. Its version macro matched the bundle we replaced, so we pin the RC
+> directly. If you need to switch versions, override `LIBSPDM_SRC` /
+> `OPENSSL_SRC` in the Makefile.
+>
+> Both build dirs live under `lib/build/`, deliberately **outside** the
+> submodules — a parent `.gitignore` cannot reach into a submodule, so an
+> in-tree build would leave `lib/openssl` permanently reported as modified.
 
 ## Build
 
-Prebuilt libspdm + openssl are bundled in `lib/` (x86_64 Linux, openssl
-backend) — no libspdm/openssl source required on the build machine. Build
-machine needs only gcc and standard system libs (pthread/dl/m).
+Build machine needs gcc, cmake, perl (for openssl Configure), and standard
+system libs (pthread/dl/m). Submodule sources are version-pinned below; once
+initialized they build themselves from the Makefile.
 
 ```bash
+# 1. After cloning, initialize submodules once:
+git submodule update --init --recursive
+
+# 2. Build dependencies (libspdm + openssl from source), then the host tool:
 cd spdm_tool
-make            # spdm_tool + responder
+make            # builds deps + spdm_tool + responder; `make -j` works
 ```
 
-> For another architecture, build libspdm yourself and point the Makefile's
-> `LIBSPDM_INC` / `LIBSPDM_LIB` / `LIBSPDM_OPENSSL_LIB` at your build.
+`make` builds, in dependency order:
+1. **openssl** — out-of-tree Configure (`linux-x86_64 no-shared`) + `make build_libs` → `lib/build/openssl/libcrypto.a`.
+2. **libspdm** — CMake (`ARCH=x64 TOOLCHAIN=GCC TARGET=Debug CRYPTO=openssl ENABLE_BINARY_BUILD=1 DISABLE_TESTS=1`), pointed at `lib/build/openssl` via `COMPILED_LIBCRYPTO_PATH`/`COMPILED_LIBSSL_PATH` → `lib/build/libspdm/lib/*.a`.
+3. **spdm_tool** (host requester) and **responder** (UDP/DOE test responder), both linking those archives.
+
+Build outputs:
+- `lib/build/libspdm/lib/*.a`, `lib/build/openssl/libcrypto.a` — gitignored
+- `spdm_tool/spdm_tool`, `spdm_tool/responder` — gitignored
+
+Other targets: `make deps` (deps only), `make libspdm` / `make openssl`
+(one dep), `make clean` (host binaries only), `make distclean` (also removes
+`lib/build/`), `make help`.
+
+> To override (e.g., reuse an existing openssl / libspdm build), override
+> `LIBSPDM_SRC` / `LIBSPDM_BUILD` / `OPENSSL_SRC` / `OPENSSL_BUILD` in
+> `spdm_tool/Makefile`; the dep targets then no-op if the archives already exist.
 
 ## Usage
 
@@ -35,8 +73,12 @@ spdm_tool --trans tcp --cert <root-cert.der>
 # MCTP path (needs AF_MCTP kernel + mctp_bridge + bridge)
 spdm_tool --trans mctp --eid 8 --cert <root-cert.der>
 
-# DOE path (needs doe.ko + receiver)
+# DOE path - direct (doe.ko loaded, no receiver needed)
 sudo scripts/switch_mode.sh doe
+spdm_tool --trans doe --cert <root-cert.der>     # direct, --doe-dev defaults to /dev/doe0
+#   SPDM not advertised on that instance? retry with --doe-cap security
+
+# DOE path - UDP relay (kept for regression vs spdm_responder_udp)
 cxl_test_tool -s <bdf> -U 2324 -k      # receiver (in the original CXL tool repo)
 spdm_tool --trans doe --doe-udp 127.0.0.1:2324 --cert <root-cert.der>
 ```
@@ -49,4 +91,5 @@ spdm_tool --trans doe --doe-udp 127.0.0.1:2324 --cert <root-cert.der>
 
 - M1 TCP smoke: full SPDM flow PASS (GET_VERSION→MEASUREMENTS, signature verified)
 - DOE end-to-end: full 7-step flow PASS against spdm_responder_udp
+- DOE direct (/dev/doeN ioctl via doe.ko): error paths verified locally, hardware flow pending
 - Hardware smoke (Gate 0 → M2/M3/M4): pending real device environment

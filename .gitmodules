@@ -1,0 +1,6 @@
+[submodule "lib/libspdm"]
+	path = lib/libspdm
+	url = https://github.com/DMTF/libspdm.git
+[submodule "lib/openssl"]
+	path = lib/openssl
+	url = https://github.com/openssl/openssl.git

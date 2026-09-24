@@ -1,3 +1,8 @@
 spdm_tool/spdm_tool
 spdm_tool/responder
 spdm_tool/*.o
+
+# Dependency build output (libspdm via CMake, openssl via Configure).
+# Deliberately OUTSIDE the submodules: a parent .gitignore cannot reach into a
+# submodule, so building in-tree would leave lib/openssl permanently dirty.
+lib/build/

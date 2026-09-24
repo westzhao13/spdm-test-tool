@@ -132,68 +132,8 @@ static libspdm_return_t rsp_acquire_receiver(void *ctx, void **buf)
 }
 static void rsp_release_receiver(void *ctx, const void *msg) {}
 
-static bool read_file(const char *path, uint8_t **data, size_t *size)
-{
-    FILE *fp = fopen(path, "rb");
-    long len;
-    uint8_t *buf;
-
-    if (fp == NULL) {
-        return false;
-    }
-    fseek(fp, 0, SEEK_END);
-    len = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    if (len <= 0) {
-        fclose(fp);
-        return false;
-    }
-    buf = malloc((size_t)len);
-    if (buf == NULL) {
-        fclose(fp);
-        return false;
-    }
-    if (fread(buf, 1, (size_t)len, fp) != (size_t)len) {
-        free(buf);
-        fclose(fp);
-        return false;
-    }
-    fclose(fp);
-    *data = buf;
-    *size = (size_t)len;
-    return true;
-}
-
-/* Integrator-provided file I/O required by spdm_device_secret_lib_sample. */
-bool libspdm_read_input_file(const char *file_name, void **file_data,
-                             size_t *file_size)
-{
-    return read_file(file_name, (uint8_t **)file_data, file_size);
-}
-
-bool libspdm_write_output_file(const char *file_name, const void *file_data,
-                               size_t file_size)
-{
-    FILE *fp = fopen(file_name, "wb");
-    if (fp == NULL) {
-        return false;
-    }
-    if (file_size > 0 && fwrite(file_data, 1, file_size, fp) != file_size) {
-        fclose(fp);
-        return false;
-    }
-    fclose(fp);
-    return true;
-}
-
-void libspdm_dump_hex_str(const uint8_t *buffer, size_t buffer_size)
-{
-    size_t index;
-
-    for (index = 0; index < buffer_size; index++) {
-        printf("%02x", buffer[index]);
-    }
-}
+/* Integrator file I/O hooks (libspdm_read_input_file / write_output_file /
+ * dump_hex_str) live in spdm_io.c, shared with the requester binary. */
 
 /* Provided by spdm_device_secret_lib_sample; builds a proper SPDM cert chain
  * (length + root_hash + DER certs) from sample_key files. */
