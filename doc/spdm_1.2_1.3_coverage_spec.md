@@ -1,7 +1,7 @@
 # SPDM 1.2 + 1.3 全命令覆盖实现规格
 
 **日期**: 2026-09-24
-**前置**: `doc/test_flow.md`（传输通道）、wiki `protocol_wiki/platform-manage/wiki/specs/spdm-base.md`（DSP0274 命令模型）
+**前置**: [`doc/doe_transport.md`](doe_transport.md)（DOE 三条跑法，含无硬件的回环验证 —— 本规格每条 runnable check 都靠它落地）、wiki `protocol_wiki/platform-manage/wiki/specs/spdm-base.md`（DSP0274 命令模型）
 **范围**: 自本规格起,推进 SPDM test tool 对 DSP0274 1.2/1.3 命令流的覆盖,达到 1.2/1.3 命令可发起、可验证、可在 hw_smoke 上收敛。
 
 ---
@@ -51,9 +51,12 @@
 
 ### CLI 暴露面（截至当前提交）
 
-- 单步命令 6 个：`version / capabilities / algorithms / digest / cert / chal / meas`
+- 单步命令 7 个：`version / capabilities / algorithms / digest / cert / chal / meas`（`--cmd <name>`）
 - 一次性全流（默认）：`do_connection → do_digest → do_certificate → do_challenge → do_measurement`
-- 可选项：`--skip digest|cert|chal|meas`、`--slot <n>`、`--cert <peer root.der>`、`--trans tcp|mctp|doe`
+- 传输与寻址：`--trans tcp|mctp|doe`、`--port <n>`、`--eid <n>`、
+  `--doe-dev <path>`（默认 `/dev/doe0`）、`--doe-udp <host:port>`、
+  `--doe-cap normal|security`（默认 `normal`）、`--doe-cap-offset <0xNNN>`
+- 其余：`--skip digest|cert|chal|meas`、`--slot <n>`、`--cert <peer root.der>`
 - **未暴露**：`--min-version`、`--algo-*`、`--cap-*`、`--session-id`、`--cmd session`、`--cmd key-update`、`--cmd heartbeat`、`--cmd end-session`、`--cmd get-csr`、`--cmd set-cert`、`--cmd subscribe-event`、`--cmd send-event`、`--cmd vendor-req`、`--in-session`
 
 ### 与 wiki 命令面的一致度

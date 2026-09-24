@@ -1,7 +1,8 @@
 # spdm-test-tool
 
 Host-side SPDM test tool (libspdm-based requester) and supporting docs/scripts
-for testing a CXL device's SPDM implementation over MCTP or PCIe DOE.
+for testing a CXL device's SPDM implementation over **MCTP**, **PCIe DOE**, or
+**TCP**. It can also run with no hardware at all, against the bundled responder.
 
 ## Layout
 
@@ -11,7 +12,9 @@ spdm_tool/    SPDM test tool source (libspdm requester, TCP/MCTP/DOE transports)
               + spdm_io.c (integrator file-I/O hooks shared by both binaries)
 driver/doe/   out-of-tree PCIe DOE kernel module (doe.ko) — GPL-2.0, vendored
 lib/          libspdm + openssl git submodules; lib/build/ holds their build output
-doc/          test_flow.md (transport/wire detail), spdm_1.2_1.3_coverage_spec.md
+doc/          doe_transport.md (how to run DOE: loopback / direct / relay),
+              spdm_1.2_1.3_coverage_spec.md (1.2/1.3 coverage roadmap),
+              test_flow.md (external cxl_sideband repo: MCTP bridge + receiver)
 scripts/      switch_mode.sh (mctp|doe driver switch) + the mode scripts it drives,
               hw_smoke.sh (on-device smoke)
 ```
@@ -23,9 +26,9 @@ source is vendored here so the repo is self-contained.
 
 - **License**: GPL-2.0 (`driver/doe/LICENSE`) — separate from this repo's
   Apache-2.0. It is a kernel module, so that split is expected.
-- **Vendored from** `pine_vd_scripts@9a78266` (`cxl_tools/doe_test_app/driver/`),
-  copied verbatim. Edits made there do not propagate — re-diff against upstream
-  if you need to pull a change.
+- **Copied verbatim** from the upstream DOE driver and kept unmodified, so it can
+  be re-diffed against upstream to pull a change. Do not edit it in place; the
+  tool-side counterpart is `spdm_tool/transport_doe.c`.
 - **Build**: `make -C driver/doe` (also done on demand by
   `scripts/install_doe_driver.sh`). Needs kernel headers at
   `/lib/modules/$(uname -r)/build`; override with `KDIR=` / `DIST=`. Note the
@@ -61,8 +64,9 @@ need those scripts, which is why all four live in `scripts/`.
 ## Build
 
 Build machine needs gcc, cmake, perl (for openssl Configure), and standard
-system libs (pthread/dl/m). Submodule sources are version-pinned below; once
-initialized they build themselves from the Makefile.
+system libs (pthread/dl/m). The submodule sources are version-pinned in the
+table above; once initialized they build themselves from the Makefile.
+Building the kernel module additionally needs kernel headers — see above.
 
 ```bash
 # 1. After cloning, initialize submodules once:
@@ -93,29 +97,40 @@ Other targets: `make deps` (deps only), `make libspdm` / `make openssl`
 ## Usage
 
 ```bash
-# TCP smoke against spdm_responder_emu
-spdm_tool --trans tcp --cert <root-cert.der>
+# No hardware: loopback against the bundled responder (full recipe: doc/doe_transport.md)
+cd /tmp && mkdir -p spdm-sim && cd spdm-sim
+ln -s <repo>/lib/libspdm/unit_test/sample_key/ecp384 ecp384  # responder reads this from cwd
+<repo>/spdm_tool/responder &
+<repo>/spdm_tool/spdm_tool --trans doe --doe-udp 127.0.0.1:2326
 
-# MCTP path (needs AF_MCTP kernel + mctp_bridge + bridge)
-spdm_tool --trans mctp --eid 8 --cert <root-cert.der>
-
-# DOE path - direct (doe.ko loaded, no receiver needed)
+# DOE path - direct, straight to the device's DOE mailbox (doe.ko, no receiver)
 sudo scripts/switch_mode.sh doe
 spdm_tool --trans doe --cert <root-cert.der>     # direct, --doe-dev defaults to /dev/doe0
 #   SPDM not advertised on that instance? retry with --doe-cap security
 
-# DOE path - UDP relay (kept for regression vs spdm_responder_udp)
-cxl_test_tool -s <bdf> -U 2324 -k      # receiver (in the original CXL tool repo)
-spdm_tool --trans doe --doe-udp 127.0.0.1:2324 --cert <root-cert.der>
+# TCP smoke against spdm_responder_emu (from the spdm-emu project)
+spdm_tool --trans tcp --cert <root-cert.der>
+
+# MCTP path - needs AF_MCTP kernel + mctp_bridge + bridge + a receiver process,
+# all from the external cxl_sideband repo: https://github.com/whou-sfx/cxl_sideband
+spdm_tool --trans mctp --eid 8 --cert <root-cert.der>
 ```
 
-> The DOE receiver (`udp_doe_forward_loop`, `-U/-C/-k` options) lives in the
-> original cxl_test_tool source (`pine_vd_scripts/CXL_SCAN_TOOL/cxl_test_tool/`);
-> this repo keeps the host-side tool, docs and deployment script.
+> The DOE transport, both hardware-free and on-device, is documented in
+> [`doc/doe_transport.md`](doc/doe_transport.md). The MCTP/UDP relay environment
+> (bridge plus the receiver process) is **not** part of this repo — see
+> [`doc/test_flow.md`](doc/test_flow.md), which describes the external
+> [cxl_sideband](https://github.com/whou-sfx/cxl_sideband) repo.
 
 ## Verification status
 
-- M1 TCP smoke: full SPDM flow PASS (GET_VERSION→MEASUREMENTS, signature verified)
-- DOE end-to-end: full 7-step flow PASS against spdm_responder_udp
-- DOE direct (/dev/doeN ioctl via doe.ko): error paths verified locally, hardware flow pending
-- Hardware smoke (Gate 0 → M2/M3/M4): pending real device environment
+| Path | Status |
+|---|---|
+| Loopback vs bundled responder (`--doe-udp`) | ✅ full SPDM flow PASS, signature verified, rc=0 |
+| TCP smoke vs `spdm_responder_emu` | ✅ full flow PASS (GET_VERSION→MEASUREMENTS, signature verified) |
+| DOE direct (`--doe-dev` / `doe.ko`) | ⚠️ error paths verified; the mailbox flow needs a real device |
+| `doe.ko` build | ⚠️ reaches kbuild with the right `-D` flags; producing `doe.ko` needs kernel headers |
+| Hardware smoke (`hw_smoke.sh`, Gate 0 → M2/M3/M4) | ⏳ pending a real device environment |
+
+The loopback row is the one that needs no hardware — see
+[`doc/doe_transport.md`](doc/doe_transport.md).

@@ -1,6 +1,16 @@
 # MCTP Bridge 测试流文档 (Test Flow)
 
-**位置**: `cxl_sideband/sfx/driver/`
+> ## ⚠️ 本文档描述的是**外部仓库**，内容不在本仓库里
+>
+> `mctp_bridge.ko`、`bridge` 守护进程、UDP 收端进程都来自
+> **[whou-sfx/cxl_sideband](https://github.com/whou-sfx/cxl_sideband)**。
+> 本仓库（spdm-test-tool）只提供 **host 侧 SPDM 工具**，它通过 UDP 接到那套
+> bridge 上——MCTP 路径的环境准备必须先 clone 那个仓库。
+>
+> 只跑 **DOE 路径**不需要它：本仓库自包含（驱动 + 脚本 + 工具都在这里），
+> 见 [doe_transport.md](doe_transport.md)。
+
+**位置**: [cxl_sideband](https://github.com/whou-sfx/cxl_sideband) 的 `sfx/driver/`（外部仓库）
 **日期**: 2026-08-07
 **目标**: 总结 `mctp_bridge.ko` + `bridge` 守护进程的机制与测试流程——一套"提取内核 MCTP 报文、由 bridge 操作、转发到 UDP"的系统,并给出 SPDM 场景的接入点。
 
@@ -158,7 +168,7 @@ Host SPDM app (libspdm)                        接收端进程 (单进程, 双 U
 
 ### 8.3 DOE 通道:DOE 驱动收发
 
-参考 `pine_vd_scripts/cxl_tools/doe_test_app`(`doe_ioctl` / `doe_discovery` 模式):
+参考本仓库的驱动实现（`driver/doe/`，ioctl 定义见 `driver/doe/doe_api.h`）：
 
 ```c
 /* 接收端收到 UDP DOE 数据对象后 */
@@ -169,8 +179,8 @@ ioctl(fd_doe, DOE_IOCTL_MBOX_CMD, buf);     /* doe.ko 完成 mailbox 时序 */
 sendto(sock_doe, buf + 1, rsp_len, peer);   /* 响应(DOEHeader+payload)原样回 peer */
 ```
 
-- doe.ko:probe CXL.mem 设备(class 0x0502)→ 遍历扩展配置空间找 DOE capability → MSI/MSI-X → `/dev/doe0`
-- ioctl `DOE_IOCTL_MBOX_CMD`(`_IOWR('N', 0xb7)`)内核 `pcie_doe_exchange()` 完成"写 mbox → GO → 轮询 ready → 读 mbox"
+- doe.ko:probe CXL.mem 设备(PCI class `0x050210`)→ 遍历扩展配置空间找 DOE capability → MSI/MSI-X → `/dev/doe0`
+- ioctl `DOE_IOCTL_MBOX_CMD`(`_IO('N', 0xb7)`)内核 `pcie_doe_exchange()` 完成"写 mbox → GO → 轮询 ready → 读 mbox"
 - Security DOE 通告数据对象类型:0x01 cma spdm、0x02 secured cma spdm —— 与 libspdm `pcidoe.h` 常量一致
 - cap_offset 选择:传参 `--doe-cap normal|security`(SPDM 走 Security DOE)
 - host 侧 libspdm `pci_doe` transport 的 device I/O 回调 = UDP client:`sendto`(transport 输出的数据对象)+ `recvfrom`(响应)
@@ -191,54 +201,24 @@ bridge → UDP A 原样 MCTP 帧(4B mctp_hdr + 1B msg_type + payload)→ 接收�
 
 ### 8.6 参考代码
 
+标 ★ 的在本仓库内；其余在 [cxl_sideband](https://github.com/whou-sfx/cxl_sideband) 里。
+
 | 内容 | 位置 |
 |---|---|
-| DOE 驱动(内核) | `pine_vd_scripts/cxl_tools/doe_test_app/driver/doe_main.c` |
-| DOE 驱动 ioctl API | `pine_vd_scripts/cxl_tools/doe_test_app/driver/doe_api.h` |
-| 用户态 DOE 收发/Discovery | `pine_vd_scripts/cxl_tools/doe_test_app/src/doe_discovery.c`、`include/pcie_doe.h` |
-| 驱动装载/卸载 | `install_doe_driver.sh` / `remove_cxl_driver.sh`(与 cxl 驱动互斥) |
+| DOE 驱动(内核) ★ | `driver/doe/doe_main.c` |
+| DOE 驱动 ioctl API ★ | `driver/doe/doe_api.h` |
+| host 侧 DOE 收发/Discovery ★ | `spdm_tool/transport_doe.c` |
+| 驱动装载/卸载 ★ | `scripts/install_doe_driver.sh` / `scripts/remove_cxl_driver.sh`(与 cxl 驱动互斥) |
+| MCTP bridge / 收端进程 | cxl_sideband 的 `sfx/driver/`（外部仓库） |
 
-## 9. SPDM Test Tool 使用手册(2026-08-10 落地)
+## 9. SPDM Test Tool 使用手册
 
-### 9.1 构建
+> **构建与参数不在这里**，看 [README](../README.md)（构建）和
+> [doe_transport.md](doe_transport.md)（DOE 三种跑法 + 报错对照表，
+> 含纯软件回环）。`spdm_tool --help` 永远是最新参数表。
+> 本节只保留历史验证记录。
 
-```bash
-# 前置: spdm-emu 子模块 libspdm 已构建(与 responder 同版本,避免 wire 格式不匹配)
-cd /home/xiangzhao/pine/sfx/spdm/cxl_sideband/sfx/spdm_tool
-make            # 产出 spdm_tool,链接 spdm-emu/build/lib + 系统 openssl
-```
-
-### 9.2 参数
-
-```
-spdm_tool --trans tcp|mctp|doe [options]
-  --trans <tcp|mctp|doe>   传输模式
-  --port <n>               TCP listen 端口(默认 4194,trans=tcp)
-  --eid <n>                远端 MCTP EID(默认 8,trans=mctp)
-  --doe-udp <host:port>    DOE 接收端 UDP 端点(trans=doe)
-  --doe-cap <normal|security>  DOE cap 偏移(0xd00/0xd80,默认 security)
-  --cert <file.der>        对端 root cert(CHALLENGE 验证用)
-  --slot <n>               responder slot(默认 0)
-  --skip <a,b,c,d>         跳过 digest/cert/chal/meas
-```
-
-### 9.3 运行流程(三模式)
-
-```bash
-# 模式 1: TCP 冒烟(对 spdm_responder_emu)
-spdm_tool --trans tcp --cert ecp384/ca.cert.der
-
-# 模式 2: MCTP(需 AF_MCTP 内核 + mctp_bridge + 固件 SPDM-over-MCTP)
-sudo ./switch_mode.sh mctp && ./setup.sh && ./bridge &
-spdm_tool --trans mctp --eid 8 --cert <root.der>
-
-# 模式 3: DOE(需 doe.ko + 设备 Security DOE)
-sudo ./switch_mode.sh doe
-cxl_test_tool -s <bdf> -U 2324 -k          # DOE 接收端
-spdm_tool --trans doe --doe-udp 127.0.0.1:2324 --cert <root.der>
-```
-
-### 9.4 验证记录(2026-08-10, WSL2 环境)
+### 验证记录(2026-08-10, WSL2 环境)
 
 | 项 | 结果 |
 |---|---|
@@ -251,7 +231,13 @@ spdm_tool --trans doe --doe-udp 127.0.0.1:2324 --cert <root.der>
 > 自研 UDP responder 验证中修复的 libspdm 集成要点(真实 doe.ko 集成同样适用):
 > DOE Discovery(type=0x00)非 SPDM 消息,需应用层自处理;`recvfrom` 前必须初始化 `fromlen`;transport 注册 max 需 = buffer - header - tail;`PSK_CAP`/`MEAS_CAP` 宏为组合位(psk_cap/meas_cap 字段=3 非法,用单一位宏);证书链须 SPDM 格式(length+root_hash,用 `libspdm_read_responder_public_certificate_chain`);SPDM 1.3+ 需设置 `LOCAL_SUPPORTED_SLOT_MASK` 覆盖 provisioned mask。
 
-### 9.5 待硬件环境执行
+### 待硬件环境执行
 
-Gate 0(设备 Security DOE 通告 + 证书)→ M2(MCTP,需 AF_MCTP 内核 + 固件 SPDM 支持)→ M3/M4(doe.ko + 真实设备 Phase 4 用例)。
+一次性冒烟脚本是 `scripts/hw_smoke.sh`（Gate 0 设备发现 → M2 MCTP → M3/M4 doe.ko + 直连 DOE）：
+
+```bash
+sudo scripts/hw_smoke.sh --cert <root.der> [--bdf bb:dd.f] [--eid 8]
+```
+
+其中 M4 走的是**直连驱动**路径（`--trans doe --doe-dev /dev/doeN`），不再需要上面的收端进程；本仓库的 DOE 三条路径见 [doe_transport.md](doe_transport.md)。
 

@@ -41,9 +41,12 @@ sudo scripts/switch_mode.sh doe
 spdm_tool/spdm_tool --trans doe --cert <root-cert.der>
 spdm_tool/spdm_tool --trans doe --doe-cap security --cert <root-cert.der>   # if SPDM not on normal instance
 
-# DOE UDP relay (kept for regression vs spdm_responder_udp)
-spdm_tool/spdm_tool --trans doe --doe-udp 127.0.0.1:2324 --cert <root-cert.der>
-# receiver cxl_test_tool -U 2324 -k lives in another repo (pine_vd_scripts/...)
+# Pure-software loopback - no hardware, no doe.ko (see doc/doe_transport.md):
+#   run spdm_tool/responder, then point the tool at it
+spdm_tool/responder &                        # needs ecp384/ in cwd, see the doc
+spdm_tool/spdm_tool --trans doe --doe-udp 127.0.0.1:2326 --cert <root-cert.der>
+# To relay to real hardware instead, the UDP peer is a receiver process from the
+# external cxl_sideband repo (https://github.com/whou-sfx/cxl_sideband)
 
 # Real-hardware smoke (Gate 0 → M2/M3-M4, needs sudo + non-WSL2)
 sudo scripts/hw_smoke.sh --cert <root.der> [--bdf bb:dd.f] [--eid 8]
@@ -61,7 +64,7 @@ Driver muting between cxl stack and doe.ko is mode-exclusive; the toggle script 
   - `transport_doe.c` — two sub-modes: `--doe-udp <host:port>` (UDP relay) or `--doe-dev /dev/doeN` (direct `DOE_IOCTL_MBOX_CMD` ioctl). Self-implements **DOE Discovery** (PCI_SIG + SPDM 0x01 / Secured 0x02) before any SPDM traffic.
 - **Test responder** — `spdm_tool/spdm_responder_udp.c`: libspdm responder over UDP/2326, with self-handled DOE Discovery and libspdm sample cert chain (`ecp384/bundle_responder.certchain.der`). Used for regression when no device is present.
 - **Integrator hooks** — `spdm_tool/spdm_io.c`: `libspdm_read_input_file` / `libspdm_write_output_file` / `libspdm_dump_hex_str`, required by libspdm's `device_secret_lib_sample`. Shared by both binaries — do not re-declare them in `spdm_client.c` or `spdm_responder_udp.c` (that is how they got duplicated once already).
-- **DOE kernel module** — `driver/doe/` (vendored GPL-2.0, copied verbatim from `pine_vd_scripts`, so upstream edits do not propagate). Built by `make -C driver/doe`, or on demand by `scripts/install_doe_driver.sh`. `scripts/switch_mode.sh` drives install/uninstall for both modes and resolves them through `$SCRIPT_DIR`, so those four script filenames must stay exact.
+- **DOE kernel module** — `driver/doe/` (GPL-2.0, kept byte-identical to the upstream driver so it can be re-diffed; do not edit in place). Built by `make -C driver/doe`, or on demand by `scripts/install_doe_driver.sh`. `scripts/switch_mode.sh` drives install/uninstall for both modes and resolves them through `$SCRIPT_DIR`, so those four script filenames must stay exact.
 - **Single-step CLI modes** dispatch into `do_<x>` in `spdm_client.c`. Full flow (default) runs `do_connection → do_digest → do_certificate → do_challenge → do_measurement` in order.
 
 ## Pitfalls / non-obvious invariants from history
@@ -83,5 +86,6 @@ These have bitten us and matter when changing anything in `spdm_client.c` / `spd
 | File | When |
 |---|---|
 | `README.md` | Build & run quickstart (already complete with the major flows) |
-| `doc/test_flow.md` | UDP-relay / DOE wire format and known wire-protocol bugs to avoid |
+| `doc/doe_transport.md` | How to run the DOE transport — loopback with no hardware, direct `doe.ko`, or UDP relay; includes the per-errno troubleshooting table |
 | `doc/spdm_1.2_1.3_coverage_spec.md` | Active roadmap for filling the 1.2/1.3 command-surface gap — consult before adding any new `--cmd` |
+| `doc/test_flow.md` | **Describes an external repo** ([cxl_sideband](https://github.com/whou-sfx/cxl_sideband)): the MCTP bridge and UDP receiver process that the MCTP path needs. Read only when working on that path |
