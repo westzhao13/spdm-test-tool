@@ -24,7 +24,7 @@
 #define SPDM_TOOL_CMD_MEAS         7
 
 /* Buffer sizing, same policy as spdm-emu spdm_emu.h.
- * LIBSPDM_TCP_TRANSPORT_*_SIZE are not exported by libspdm 3.8.2
+ * LIBSPDM_TCP_TRANSPORT_*_SIZE are not exported by libspdm 4.0.0
  * (spdm-emu submodule carries them); values match spdm-emu. */
 #define LIBSPDM_TRANSPORT_ADDITIONAL_SIZE 64
 #define LIBSPDM_SENDER_BUFFER_SIZE   (0x1100 + LIBSPDM_TRANSPORT_ADDITIONAL_SIZE)
@@ -40,7 +40,11 @@ typedef struct {
     int         transport;
     uint16_t    tcp_port;         /* TCP listen port (trans=tcp) */
     uint8_t     mctp_eid;         /* remote MCTP EID (trans=mctp) */
-    const char *doe_udp;          /* "host:port" for DOE UDP (trans=doe) */
+    const char *doe_udp;          /* "host:port" for DOE UDP relay (trans=doe) */
+    const char *doe_dev;          /* "/dev/doeN" for DOE direct ioctl (trans=doe) */
+    bool        doe_cap_security; /* direct mode: security DOE instance (0xd80), not normal (0xd00) */
+    bool        doe_cap_set;      /* direct mode: raw --doe-cap-offset given */
+    uint32_t    doe_cap_offset;   /* direct mode: raw DOE cap offset override */
     const char *root_cert_path;   /* peer root cert (DER) for CHALLENGE, may be NULL */
     int         cmd;              /* SPDM_TOOL_CMD_* single-step mode */
     bool        do_digest;

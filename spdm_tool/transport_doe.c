@@ -1,6 +1,8 @@
-/* SPDM test tool - DOE transport via UDP client
- * Path: UDP -> receiver (cxl_test_tool --doe-port) -> /dev/doe0 ioctl -> device DOE.
- * DOE data objects (8B DOEHeader + payload) travel verbatim over UDP.
+/* SPDM test tool - DOE transport
+ * Two exchange backends behind the same libspdm pci_doe transport:
+ *   direct : /dev/doeN ioctl (doe.ko) -> device DOE mailbox
+ *   udp    : UDP -> receiver (cxl_test_tool --doe-port) -> /dev/doe0 -> device
+ * DOE data objects (8B DOEHeader + payload) travel verbatim in both modes.
  * PCIe-layer DOE Discovery is performed by tr_doe_discovery() before SPDM starts.
  */
 #include <stdio.h>
@@ -9,6 +11,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <netdb.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -21,7 +25,34 @@
 
 #define DOE_UDP_TIMEOUT_MS 5000
 
+/* -- direct backend: doe.ko char device ioctl ------------------------- */
+
+/* doe.ko uapi contract (doe_test_app/driver/doe_api.h + doe.h).
+ * Two cmd encodings exist across driver generations; the driver copies
+ * DOE_IOCTL_BUF_SIZE bytes both ways regardless of the _IOC size bits:
+ *   deployed (Sep '26): _IO('N', 0xb7)          - 1MB payload does not fit _IOC bits
+ *   older   (Aug '26):  _IOWR('N', 0xb7, 2048)  - struct doe_buf size encoded
+ * g_mbox_cmd starts on the deployed encoding and falls back once on ENOTTY. */
+#define DOE_IOCTL_MBOX_CMD_NEW  _IO('N', 0xb7)
+struct doe_ioctl_2048 { char buf[2048]; };
+#define DOE_IOCTL_MBOX_CMD_OLD  _IOWR('N', 0xb7, struct doe_ioctl_2048)
+#define DOE_IOCTL_MAX_DW_SIZE  (1 << 18)                    /* doe.h */
+#define DOE_IOCTL_BUF_SIZE  ((DOE_IOCTL_MAX_DW_SIZE + 1) * sizeof(uint32_t))
+
+/* DOE Extended Capability instance offsets on this device's firmware
+ * (doe_test_app Makefile -D flags, NOT spec values; driver ioctl accepts
+ * only these two). normal=CDAT-class protocols, security=SPDM-class. */
+#define DOE_CAP_NORMAL_OFF   0xd00u
+#define DOE_CAP_SECURITY_OFF 0xd80u
+
 static int g_udp_fd = -1;
+static int g_dev_fd = -1;        /* direct backend */
+static unsigned g_mbox_cmd = DOE_IOCTL_MBOX_CMD_NEW;
+static uint8_t *g_dev_buf;       /* ioctl buffer, DOE_IOCTL_BUF_SIZE */
+static uint32_t g_cap_off;       /* selected DOE instance */
+static bool g_cap_raw;           /* cap offset came from --doe-cap-offset */
+static uint8_t *g_rsp;            /* direct mode: response cached by send */
+static size_t g_rsp_len;
 static uint8_t g_rxbuf[LIBSPDM_RECEIVER_BUFFER_SIZE];
 static struct sockaddr_in g_dst;
 
@@ -34,22 +65,76 @@ typedef struct {
 } doe_hdr_t;
 #pragma pack(pop)
 
-/* One DOE data object exchange over UDP (blocking). */
-static int doe_udp_exchange(const uint8_t *req, size_t req_len,
-                            uint8_t *rsp, size_t *rsp_len)
+/* One DOE data object exchange (blocking). *rsp points into a backend-owned
+ * buffer valid until the next exchange. */
+static int doe_exchange(const uint8_t *req, size_t req_len,
+                        const uint8_t **rsp, size_t *rsp_len)
 {
-    ssize_t n;
+    if (g_dev_fd >= 0) {
+        uint32_t len_dw;
 
+        if (req_len < sizeof(doe_hdr_t) ||
+            req_len + sizeof(uint32_t) > DOE_IOCTL_BUF_SIZE) {
+            fprintf(stderr, "[DOE] bad request size %zu\n", req_len);
+            return -1;
+        }
+        *(uint32_t *)g_dev_buf = g_cap_off;   /* DW[0]: instance selector */
+        memcpy(g_dev_buf + sizeof(uint32_t), req, req_len);
+        int rc = ioctl(g_dev_fd, g_mbox_cmd, g_dev_buf);
+        if (rc != 0 && errno == ENOTTY &&
+            g_mbox_cmd != (unsigned)DOE_IOCTL_MBOX_CMD_OLD) {
+            fprintf(stderr, "[DOE] cmd 0x%08x not recognized, "
+                    "retrying with legacy encoding 0x%08x\n",
+                    g_mbox_cmd, (unsigned)DOE_IOCTL_MBOX_CMD_OLD);
+            g_mbox_cmd = (unsigned)DOE_IOCTL_MBOX_CMD_OLD;
+            rc = ioctl(g_dev_fd, g_mbox_cmd, g_dev_buf);
+        }
+        if (rc != 0) {
+            /* staged: ENOTTY = neither encoding recognized (third .ko variant)
+             *         EBUSY  = in-mailbox device exchange timeout (~1s)
+             *         EINVAL = cap offset rejected (built-in macros differ) */
+            fprintf(stderr, "[DOE] ioctl(cmd 0x%08x) failed: %s\n",
+                    g_mbox_cmd, strerror(errno));
+            if (errno == ENOTTY) {
+                fprintf(stderr, "[DOE] cmd not recognized by this doe.ko variant, "
+                        "or this cap instance not registered on the device - "
+                        "compare with: strace ./doe -s <bdf> -t 1; "
+                        "try --doe-cap-offset from lspci\n");
+            } else if (errno == EBUSY) {
+                fprintf(stderr, "[DOE] device exchange timed out - firmware/IRQ state?\n");
+            } else if (errno == EINVAL) {
+                fprintf(stderr, "[DOE] cap offset rejected - this build's DOE macros "
+                        "differ, use --doe-cap-offset with the probed value\n");
+            }
+            return -1;
+        }
+        /* response overwrote the buffer from DW[0]: DOEHeader + payload.
+         * length is DW[1] bits[17:0]; 0 encodes 2^18 DW - invalid here since
+         * the driver copies length*4 bytes back (0 -> stale buffer). */
+        len_dw = *(const uint32_t *)(g_dev_buf + 4) & 0x3ffffu;
+        *rsp_len = (size_t)len_dw * sizeof(uint32_t);
+        if (len_dw == 0 || *rsp_len > DOE_IOCTL_BUF_SIZE) {
+            fprintf(stderr, "[DOE] bad response length %u DW\n", len_dw);
+            return -1;
+        }
+        *rsp = g_dev_buf;
+        return 0;
+    }
+
+    if (g_udp_fd < 0) {
+        fprintf(stderr, "[DOE] exchange: transport not initialized\n");
+        return -1;
+    }
     if (send(g_udp_fd, req, req_len, 0) < 0) {
         fprintf(stderr, "[DOE] udp send failed: %s\n", strerror(errno));
         return -1;
     }
-    n = recv(g_udp_fd, rsp, LIBSPDM_RECEIVER_BUFFER_SIZE, 0);
-    if (n < 0) {
+    *rsp_len = recv(g_udp_fd, g_rxbuf, sizeof(g_rxbuf), 0);
+    if ((ssize_t)*rsp_len < 0) {
         fprintf(stderr, "[DOE] udp recv failed: %s\n", strerror(errno));
         return -1;
     }
-    *rsp_len = (size_t)n;
+    *rsp = g_rxbuf;
     return 0;
 }
 
@@ -59,6 +144,15 @@ static libspdm_return_t doe_device_send_message(void *spdm_context,
                                                 uint64_t timeout)
 {
     /* libspdm pci_doe transport output = complete DOE data object (header + payload) */
+    if (g_dev_fd >= 0) {
+        /* ponytail: ioctl does the whole exchange; timeout arg is ignored
+         * (driver's internal ~1s limit is the only ceiling). */
+        if (doe_exchange(message, message_size, (const uint8_t **)&g_rsp,
+                         &g_rsp_len) != 0) {
+            return LIBSPDM_STATUS_SEND_FAIL;
+        }
+        return LIBSPDM_STATUS_SUCCESS;
+    }
     if (send(g_udp_fd, message, message_size, 0) < 0) {
         fprintf(stderr, "[DOE] udp send failed: %s\n", strerror(errno));
         return LIBSPDM_STATUS_SEND_FAIL;
@@ -74,7 +168,19 @@ static libspdm_return_t doe_device_receive_message(void *spdm_context,
     ssize_t n;
     struct timeval tv;
     socklen_t tvlen = sizeof(tv);
-    uint64_t tmo = (timeout == 0) ? DOE_UDP_TIMEOUT_MS : timeout;
+    uint64_t tmo;
+
+    if (g_dev_fd >= 0) {
+        if (g_rsp == NULL) {
+            return LIBSPDM_STATUS_RECEIVE_FAIL;
+        }
+        *message = g_rsp;
+        *message_size = g_rsp_len;
+        g_rsp = NULL;   /* consumed */
+        return LIBSPDM_STATUS_SUCCESS;
+    }
+
+    tmo = (timeout == 0) ? DOE_UDP_TIMEOUT_MS : timeout;
 
     tv.tv_sec = (time_t)(tmo / 1000);
     tv.tv_usec = (suseconds_t)((tmo % 1000) * 1000);
@@ -101,8 +207,8 @@ int tr_doe_discovery(bool *spdm_ok, bool *secured_ok)
     uint8_t index = 0;
     int guard = 0;
 
-    if (g_udp_fd < 0) {
-        fprintf(stderr, "[DOE] discovery: UDP socket not connected\n");
+    if (g_udp_fd < 0 && g_dev_fd < 0) {
+        fprintf(stderr, "[DOE] discovery: transport not initialized\n");
         return -1;
     }
     *spdm_ok = false;
@@ -110,8 +216,8 @@ int tr_doe_discovery(bool *spdm_ok, bool *secured_ok)
 
     for (;;) {
         uint8_t req[12];
-        uint8_t rsp[LIBSPDM_RECEIVER_BUFFER_SIZE];
-        size_t rsp_len = sizeof(rsp);
+        const uint8_t *rsp;
+        size_t rsp_len;
         doe_hdr_t *hdr;
         uint32_t dw;
         uint16_t vid;
@@ -125,7 +231,7 @@ int tr_doe_discovery(bool *spdm_ok, bool *secured_ok)
         hdr->length = 3;
         memcpy(req + sizeof(doe_hdr_t), &index, 1);
 
-        if (doe_udp_exchange(req, sizeof(req), rsp, &rsp_len) != 0) {
+        if (doe_exchange(req, sizeof(req), &rsp, &rsp_len) != 0) {
             return -1;
         }
         if (rsp_len < sizeof(doe_hdr_t) + 4) {
@@ -154,6 +260,16 @@ int tr_doe_discovery(bool *spdm_ok, bool *secured_ok)
             break;
         }
     }
+    if (g_dev_fd >= 0 && !*spdm_ok) {
+        if (g_cap_raw) {
+            fprintf(stderr, "[DOE] SPDM (type 0x01) not advertised on instance 0x%x; "
+                    "try the other DOE instance's offset\n", g_cap_off);
+        } else {
+            fprintf(stderr, "[DOE] SPDM (type 0x01) not advertised on instance 0x%x; "
+                    "retry with --doe-cap %s\n", g_cap_off,
+                    g_cap_off == DOE_CAP_NORMAL_OFF ? "security" : "normal");
+        }
+    }
     return 0;
 }
 
@@ -164,6 +280,35 @@ int tr_doe_init(void *spdm_context, const spdm_tool_opts_t *opts)
     const char *sep;
     struct addrinfo hints, *res = NULL;
     int ret;
+
+    if (opts->doe_dev != NULL) {
+        if (opts->doe_cap_set) {
+            g_cap_off = opts->doe_cap_offset;
+            g_cap_raw = true;
+        } else {
+            g_cap_off = opts->doe_cap_security ? DOE_CAP_SECURITY_OFF
+                                               : DOE_CAP_NORMAL_OFF;
+        }
+        g_dev_buf = malloc(DOE_IOCTL_BUF_SIZE);
+        if (g_dev_buf == NULL) {
+            fprintf(stderr, "[DOE] out of memory\n");
+            return -1;
+        }
+        g_dev_fd = open(opts->doe_dev, O_RDWR | O_SYNC);
+        if (g_dev_fd < 0) {
+            fprintf(stderr, "[DOE] open %s failed: %s "
+                    "(doe.ko loaded? try scripts/switch_mode.sh doe)\n",
+                    opts->doe_dev, strerror(errno));
+            free(g_dev_buf);
+            g_dev_buf = NULL;
+            return -1;
+        }
+        printf("[DOE] direct %s (instance %s, cap off 0x%x, ioctl cmd 0x%08x)\n",
+               opts->doe_dev, opts->doe_cap_set ? "raw"
+               : opts->doe_cap_security ? "security" : "normal",
+               g_cap_off, g_mbox_cmd);
+        goto register_transport;
+    }
 
     if (opts->doe_udp == NULL) {
         fprintf(stderr, "[DOE] --doe-udp host:port required\n");
@@ -205,6 +350,7 @@ int tr_doe_init(void *spdm_context, const spdm_tool_opts_t *opts)
 
     printf("[DOE] UDP client -> %s:%u\n", host, port);
 
+register_transport:
     libspdm_register_device_io_func(spdm_context,
                                     doe_device_send_message,
                                     doe_device_receive_message);

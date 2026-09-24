@@ -1,6 +1,6 @@
 /* SPDM test tool - CLI entry
  * Usage: spdm_tool --trans tcp|mctp|doe [--port N] [--eid N]
- *                  [--doe-udp host:port]
+ *                  [--doe-udp host:port | --doe-dev /dev/doeN [--doe-cap normal|security]]
  *                  [--cert <root-cert.der>] [--slot N] [--skip digest|cert|chal|meas]
  */
 #include <stdio.h>
@@ -16,7 +16,12 @@ static void usage(const char *prog)
            "  --trans <tcp|mctp|doe>   transport to use\n"
            "  --port <n>               TCP listen port (default 4194, trans=tcp)\n"
            "  --eid <n>                remote MCTP EID (default 8, trans=mctp)\n"
-           "  --doe-udp <host:port>    DOE receiver UDP endpoint (trans=doe)\n"
+           "  --doe-udp <host:port>    DOE receiver UDP endpoint (UDP relay mode)\n"
+           "  --doe-dev <path>         DOE direct ioctl node (default /dev/doe0)\n"
+           "  --doe-cap <normal|security>\n"
+           "                           DOE instance for direct mode (default normal)\n"
+           "  --doe-cap-offset <0xNNN>\n"
+           "                           raw DOE cap offset (overrides --doe-cap)\n"
            "  --cert <file.der>        peer root cert for CHALLENGE verification\n"
            "  --slot <n>               responder slot id (default 0)\n"
            "  --skip <a,b,c,d>         skip digest/cert/chal/meas steps\n"
@@ -25,8 +30,9 @@ static void usage(const char *prog)
            "  %s --trans tcp                          # smoke vs spdm_responder_emu\n"
            "  %s --trans mctp --eid 8\n"
            "  %s --trans doe --doe-udp 127.0.0.1:2324\n"
+           "  %s --trans doe --doe-dev /dev/doe0 --doe-cap security\n"
            "  %s --trans mctp --eid 8 --cmd version   # discovery step only\n",
-           prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char **argv)
@@ -37,6 +43,9 @@ int main(int argc, char **argv)
         {"port",     required_argument, NULL, 'p'},
         {"eid",      required_argument, NULL, 'e'},
         {"doe-udp",  required_argument, NULL, 'u'},
+        {"doe-dev",  required_argument, NULL, 'd'},
+        {"doe-cap",  required_argument, NULL, 'P'},
+        {"doe-cap-offset", required_argument, NULL, 'o'},
         {"cert",     required_argument, NULL, 'r'},
         {"slot",     required_argument, NULL, 's'},
         {"skip",     required_argument, NULL, 'k'},
@@ -55,7 +64,7 @@ int main(int argc, char **argv)
     opts.do_chal = true;
     opts.do_meas = true;
 
-    while ((opt = getopt_long(argc, argv, "t:p:e:u:c:r:s:k:C:h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:p:e:u:c:r:s:k:C:d:P:o:h", long_opts, NULL)) != -1) {
         switch (opt) {
         case 't':
             if (strcmp(optarg, "tcp") == 0)
@@ -78,6 +87,30 @@ int main(int argc, char **argv)
         case 'u':
             opts.doe_udp = optarg;
             break;
+        case 'd':
+            opts.doe_dev = optarg;
+            break;
+        case 'P':
+            if (strcmp(optarg, "normal") == 0)
+                opts.doe_cap_security = false;
+            else if (strcmp(optarg, "security") == 0)
+                opts.doe_cap_security = true;
+            else {
+                fprintf(stderr, "bad --doe-cap: %s (normal|security)\n", optarg);
+                return 1;
+            }
+            break;
+        case 'o': {
+            char *end;
+            unsigned long off = strtoul(optarg, &end, 0);
+            if (*end != '\0' || off == 0 || off > 0xfff) {
+                fprintf(stderr, "bad --doe-cap-offset: %s (0x1..0xfff)\n", optarg);
+                return 1;
+            }
+            opts.doe_cap_offset = (uint32_t)off;
+            opts.doe_cap_set = true;
+            break;
+        }
         case 'r':
             opts.root_cert_path = optarg;
             break;
@@ -133,9 +166,14 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 1;
     }
-    if (opts.transport == SPDM_TOOL_TRANS_DOE && opts.doe_udp == NULL) {
-        fprintf(stderr, "--doe-udp required for trans=doe\n");
-        return 1;
+    if (opts.transport == SPDM_TOOL_TRANS_DOE) {
+        if (opts.doe_udp != NULL && opts.doe_dev != NULL) {
+            fprintf(stderr, "--doe-udp and --doe-dev are mutually exclusive\n");
+            return 1;
+        }
+        if (opts.doe_udp == NULL && opts.doe_dev == NULL) {
+            opts.doe_dev = "/dev/doe0";
+        }
     }
 
     return spdm_tool_main(&opts);

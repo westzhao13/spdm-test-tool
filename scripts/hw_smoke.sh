@@ -2,7 +2,7 @@
 # hw_smoke.sh - real-hardware SPDM smoke:
 #   Gate 0 (device discovery) -> M2 (MCTP path) / M3-M4 (doe.ko + device)
 # Usage: sudo ./hw_smoke.sh --cert <root.der> [--bdf <bb:dd.f>] [--eid <n>]
-# Prereq: spdm_tool built, DOE receiver (cxl_test_tool -U) on PATH, MCTP bridge running if testing MCTP.
+# Prereq: spdm_tool built, doe.ko loaded (scripts/switch_mode.sh doe), MCTP bridge running if testing MCTP.
 set -u
 
 CERT=""; BDF=""; EID=8
@@ -46,31 +46,30 @@ else
   skip "M2 no AF_MCTP/device (bridge up?)"
 fi
 
-# M3: doe.ko + DOE receiver
-DOE_RX_PID=""
+# M3: doe.ko + /dev/doe* node (direct ioctl path, no receiver process needed)
+DOE_NODE=""
 if lsmod 2>/dev/null | grep -q '^doe' || modprobe doe 2>/dev/null; then
-  if command -v cxl_test_tool >/dev/null 2>&1 && [ -n "$BDF" ]; then
-    cxl_test_tool -s "$BDF" -U 2324 -k >/dev/null 2>&1 &
-    DOE_RX_PID=$!
-    sleep 1
-    pass "M3 doe.ko + receiver :2324 (pid $DOE_RX_PID)"
+  DOE_NODE="$(ls /dev/doe* 2>/dev/null | head -1)"
+  if [ -n "$DOE_NODE" ]; then
+    pass "M3 doe.ko + $DOE_NODE"
   else
-    fail "M3 doe.ko loaded but cxl_test_tool missing or --bdf not given"
+    fail "M3 doe.ko loaded but no /dev/doe* node (scripts/switch_mode.sh doe)"
   fi
 else
   skip "M3 doe.ko unavailable"
 fi
 
-# M4: DOE path (needs M3 receiver up)
-if [ -n "$DOE_RX_PID" ]; then
-  if "$SPDM_TOOL" --trans doe --doe-udp 127.0.0.1:2324 --cert "$CERT" >/dev/null 2>&1; then
-    pass "M4 DOE flow"
+# M4: DOE direct flow (needs M3); tries both DOE instances
+if [ -n "$DOE_NODE" ]; then
+  if "$SPDM_TOOL" --trans doe --doe-dev "$DOE_NODE" --cert "$CERT" >/dev/null 2>&1; then
+    pass "M4 DOE direct flow ($DOE_NODE, normal instance)"
+  elif "$SPDM_TOOL" --trans doe --doe-dev "$DOE_NODE" --doe-cap security --cert "$CERT" >/dev/null 2>&1; then
+    pass "M4 DOE direct flow ($DOE_NODE, security instance)"
   else
-    fail "M4 DOE flow"
+    fail "M4 DOE direct flow ($DOE_NODE)"
   fi
-  kill "$DOE_RX_PID" 2>/dev/null
 else
-  skip "M4 skipped (no DOE receiver)"
+  skip "M4 skipped (no /dev/doe*)"
 fi
 
 echo "--- summary ---"
