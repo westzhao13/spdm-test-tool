@@ -83,34 +83,63 @@ static int doe_exchange(const uint8_t *req, size_t req_len,
         int rc = ioctl(g_dev_fd, g_mbox_cmd, g_dev_buf);
         if (rc != 0 && errno == ENOTTY &&
             g_mbox_cmd != (unsigned)DOE_IOCTL_MBOX_CMD_OLD) {
-            fprintf(stderr, "[DOE] cmd 0x%08x not recognized, "
-                    "retrying with legacy encoding 0x%08x\n",
-                    g_mbox_cmd, (unsigned)DOE_IOCTL_MBOX_CMD_OLD);
-            g_mbox_cmd = (unsigned)DOE_IOCTL_MBOX_CMD_OLD;
-            rc = ioctl(g_dev_fd, g_mbox_cmd, g_dev_buf);
+            /* doe.ko returns ENOTTY both for an unknown ioctl command and for a
+             * cap offset this device does not expose (doe_main.c: "can't find
+             * the required capability"). Try the legacy encoding, but latch onto
+             * it only if it actually works: with a wrong --doe-cap both fail,
+             * and latching there would blame the driver generation for what is
+             * really a missing DOE instance. */
+            int first_errno = errno;
+            rc = ioctl(g_dev_fd, (unsigned)DOE_IOCTL_MBOX_CMD_OLD, g_dev_buf);
+            if (rc == 0) {
+                fprintf(stderr, "[DOE] cmd 0x%08x not recognized, "
+                        "using legacy encoding 0x%08x\n",
+                        g_mbox_cmd, (unsigned)DOE_IOCTL_MBOX_CMD_OLD);
+                g_mbox_cmd = (unsigned)DOE_IOCTL_MBOX_CMD_OLD;
+            } else {
+                errno = first_errno;
+            }
         }
         if (rc != 0) {
-            /* staged: ENOTTY = neither encoding recognized (third .ko variant)
-             *         EBUSY  = in-mailbox device exchange timeout (~1s)
-             *         EINVAL = cap offset rejected (built-in macros differ) */
-            fprintf(stderr, "[DOE] ioctl(cmd 0x%08x) failed: %s\n",
-                    g_mbox_cmd, strerror(errno));
+            /* EBUSY  = in-mailbox device exchange timeout (~1s)
+             * EINVAL = cap offset is not one this driver build accepts
+             * ENOTTY = neither ioctl encoding worked, or the cap offset is not
+             *          registered on this device - the instance comes first */
+            fprintf(stderr, "[DOE] ioctl(cmd 0x%08x, cap 0x%x) failed: %s\n",
+                    g_mbox_cmd, g_cap_off, strerror(errno));
             if (errno == ENOTTY) {
-                fprintf(stderr, "[DOE] cmd not recognized by this doe.ko variant, "
-                        "or this cap instance not registered on the device - "
-                        "compare with: strace ./doe -s <bdf> -t 1; "
-                        "try --doe-cap-offset from lspci\n");
+                fprintf(stderr, "[DOE] no DOE capability at 0x%x on this device, or "
+                        "neither ioctl encoding is recognized - try the other "
+                        "instance (--doe-cap %s), then compare with: "
+                        "strace ./doe -s <bdf> -t 1\n",
+                        g_cap_off,
+                        g_cap_off == DOE_CAP_SECURITY_OFF ? "normal" : "security");
             } else if (errno == EBUSY) {
                 fprintf(stderr, "[DOE] device exchange timed out - firmware/IRQ state?\n");
             } else if (errno == EINVAL) {
-                fprintf(stderr, "[DOE] cap offset rejected - this build's DOE macros "
-                        "differ, use --doe-cap-offset with the probed value\n");
+                fprintf(stderr, "[DOE] this driver build accepts only 0xd00 (normal) / "
+                        "0xd80 (security); cap 0x%x was rejected - "
+                        "check `lspci -vv` for the device's real DOE offsets\n",
+                        g_cap_off);
             }
             return -1;
         }
-        /* response overwrote the buffer from DW[0]: DOEHeader + payload.
-         * length is DW[1] bits[17:0]; 0 encodes 2^18 DW - invalid here since
-         * the driver copies length*4 bytes back (0 -> stale buffer). */
+        /* The driver copies the response over the buffer from DW[0]. A
+         * zero-length copy leaves the buffer untouched, so DW[0] would still
+         * hold the selector we just wrote and DW[1] the request's own header
+         * word - a bogus nonzero length that sails through the check below. A
+         * real response always overwrites DW[0] with its DOE header, whose low
+         * half is the PCI-SIG vendor id 0x0001; no accepted cap offset can
+         * equal that, so this discriminates cleanly. */
+        {
+            uint32_t rsp_dw0;
+            memcpy(&rsp_dw0, g_dev_buf, sizeof(rsp_dw0));
+            if (rsp_dw0 == g_cap_off) {
+                fprintf(stderr, "[DOE] device returned an empty response\n");
+                return -1;
+            }
+        }
+        /* response header: DW[0], length in DW[1] bits[17:0] (doe.h DOEHeader) */
         len_dw = *(const uint32_t *)(g_dev_buf + 4) & 0x3ffffu;
         *rsp_len = (size_t)len_dw * sizeof(uint32_t);
         if (len_dw == 0 || *rsp_len > DOE_IOCTL_BUF_SIZE) {
@@ -131,7 +160,14 @@ static int doe_exchange(const uint8_t *req, size_t req_len,
     }
     *rsp_len = recv(g_udp_fd, g_rxbuf, sizeof(g_rxbuf), 0);
     if ((ssize_t)*rsp_len < 0) {
-        fprintf(stderr, "[DOE] udp recv failed: %s\n", strerror(errno));
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            /* Bounded by the SO_RCVTIMEO set at socket creation - without it
+             * discovery would block here forever when the receiver is down. */
+            fprintf(stderr, "[DOE] udp recv timeout (%d ms) - receiver running?\n",
+                    DOE_UDP_TIMEOUT_MS);
+        } else {
+            fprintf(stderr, "[DOE] udp recv failed: %s\n", strerror(errno));
+        }
         return -1;
     }
     *rsp = g_rxbuf;
@@ -180,10 +216,18 @@ static libspdm_return_t doe_device_receive_message(void *spdm_context,
         return LIBSPDM_STATUS_SUCCESS;
     }
 
-    tmo = (timeout == 0) ? DOE_UDP_TIMEOUT_MS : timeout;
-
-    tv.tv_sec = (time_t)(tmo / 1000);
-    tv.tv_usec = (suseconds_t)((tmo % 1000) * 1000);
+    /* libspdm passes this in MICROseconds (spdm_common_lib.h: "The timeout, in
+     * microsends"); a requester gets rtt + ST1, e.g. 0 + 100000 us. Our own
+     * DOE_UDP_TIMEOUT_MS default is in MILLIseconds, so each is converted in
+     * its own unit - treating the microsecond value as ms inflated the wait
+     * 1000x (100 s instead of 100 ms). */
+    if (timeout == 0) {
+        tmo = DOE_UDP_TIMEOUT_MS * 1000;
+    } else {
+        tmo = timeout;
+    }
+    tv.tv_sec = (time_t)(tmo / 1000000);
+    tv.tv_usec = (suseconds_t)(tmo % 1000000);
     setsockopt(g_udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, tvlen);
 
     n = recv(g_udp_fd, g_rxbuf, sizeof(g_rxbuf), 0);
@@ -347,6 +391,19 @@ int tr_doe_init(void *spdm_context, const spdm_tool_opts_t *opts)
     }
     memcpy(&g_dst, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
+
+    /* Default bound for every recv on this socket, including the bare ones in
+     * doe_exchange() that discovery uses. The per-call override in
+     * doe_device_receive_message() only covers libspdm's own receive path, so
+     * without this a missing receiver hangs discovery indefinitely. */
+    {
+        struct timeval tv;
+        tv.tv_sec = DOE_UDP_TIMEOUT_MS / 1000;
+        tv.tv_usec = (DOE_UDP_TIMEOUT_MS % 1000) * 1000;
+        if (setsockopt(g_udp_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
+            perror("[DOE] SO_RCVTIMEO");
+        }
+    }
 
     printf("[DOE] UDP client -> %s:%u\n", host, port);
 

@@ -174,6 +174,16 @@ int main(int argc, char **argv)
         if (opts.doe_udp == NULL && opts.doe_dev == NULL) {
             opts.doe_dev = "/dev/doe0";
         }
+        /* The relay talks to a receiver process over UDP; the instance selector
+         * is the receiver's business, so these would be silently ignored. */
+        if (opts.doe_udp != NULL && (opts.doe_cap_set || opts.doe_cap_security)) {
+            fprintf(stderr, "--doe-cap/--doe-cap-offset apply to --doe-dev "
+                    "(direct ioctl) only, not to the --doe-udp relay\n");
+            return 1;
+        }
+    } else if (opts.doe_dev != NULL || opts.doe_cap_set || opts.doe_cap_security) {
+        fprintf(stderr, "--doe-dev/--doe-cap/--doe-cap-offset require --trans doe\n");
+        return 1;
     }
 
     return spdm_tool_main(&opts);

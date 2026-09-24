@@ -15,6 +15,7 @@
 #include "industry_standard/spdm.h"
 #include "internal/libspdm_common_lib.h"
 #include "internal/libspdm_requester_lib.h"
+#include "internal/libspdm_device_secret_lib.h"
 
 #include "spdm_tool.h"
 
@@ -49,37 +50,10 @@ static void spdm_device_release_receiver_buffer(void *spdm_context, const void *
 {
 }
 
-/* Read a DER root cert file, return malloc'd buffer (caller frees) */
-static uint8_t *read_file(const char *path, size_t *size)
-{
-    FILE *fp = fopen(path, "rb");
-    uint8_t *buf;
-    long len;
-
-    if (fp == NULL) {
-        return NULL;
-    }
-    fseek(fp, 0, SEEK_END);
-    len = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-    if (len <= 0) {
-        fclose(fp);
-        return NULL;
-    }
-    buf = malloc((size_t)len);
-    if (buf == NULL) {
-        fclose(fp);
-        return NULL;
-    }
-    if (fread(buf, 1, (size_t)len, fp) != (size_t)len) {
-        free(buf);
-        fclose(fp);
-        return NULL;
-    }
-    fclose(fp);
-    *size = (size_t)len;
-    return buf;
-}
+/* File reads go through libspdm_read_input_file() from spdm_io.c - it is the
+ * same integrator hook libspdm's device_secret_lib_sample uses, so keeping a
+ * second static reader here (as this file once did) means two copies of the
+ * same empty-file guard to keep in sync. */
 
 static void set_data(void *spdm_context, libspdm_data_type_t type,
                      libspdm_data_location_t location, const void *data, size_t size)
@@ -160,8 +134,8 @@ static void *spdm_client_init(const spdm_tool_opts_t *opts)
 
     /* peer root cert for CHALLENGE verification (optional) */
     if (opts->root_cert_path != NULL) {
-        cert = read_file(opts->root_cert_path, &cert_size);
-        if (cert == NULL) {
+        if (!libspdm_read_input_file(opts->root_cert_path, (void **)&cert,
+                                     &cert_size)) {
             fprintf(stderr, "failed to read root cert: %s\n", opts->root_cert_path);
             free(spdm_context);
             return NULL;

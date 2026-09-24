@@ -1,6 +1,8 @@
 /* SPDM test tool - common header
  * Host-side SPDM requester test tool based on libspdm.
- * Transports: TCP (smoke), MCTP (AF_MCTP), DOE (UDP -> receiver -> /dev/doe0)
+ * Transports: TCP (smoke), MCTP (AF_MCTP),
+ *             DOE - defaults to direct /dev/doeN ioctl; --doe-udp selects the
+ *             UDP relay through a receiver process instead
  */
 #ifndef SPDM_TOOL_H
 #define SPDM_TOOL_H
